@@ -1,11 +1,15 @@
-//! N64 guest memory: RDRAM + CPU segment mirrors + SP + MMIO guard.
+//! N64 guest memory: RDRAM + CPU segment mirrors + SP + cart + PIF.
 //!
-//! Guest map (M1):
+//! Guest map:
 //! - `0x00000000..0x00800000` physical RDRAM (8 MB; 4 MB base, 8 MB with pak)
 //! - `0x80000000..0x80800000` KSEG0 cached mirror of RDRAM
 //! - `0xA0000000..0xA0800000` KSEG1 uncached mirror of RDRAM
 //! - `0x04000000..0x04001000` SP DMEM (4 KiB)
 //! - `0x04001000..0x04002000` SP IMEM (4 KiB)
+//! - `0x10000000..0x14000000` cart ROM, read-only (size = loaded cart)
+//! - `0xB0000000..0xB4000000` KSEG1 uncached mirror of cart ROM
+//! - `0x1FC00000..0x1FC00800` PIF ROM, read-only (2 KiB, present when loaded)
+//! - `0xBFC00000..0xBFC00800` KSEG1 mirror of PIF ROM (CPU reset vector)
 //! - `0x03F00000..0x04000000` MMIO guard (always denied, reachable)
 //!
 //! All mapped RAM is RWX for now; `Perm` is honored for the MMIO guard
@@ -30,6 +34,18 @@ pub const SP_MEM_SIZE: usize = 4096;
 /// MMIO guard window (RI/MI/VI/AI/PI/SI/DP, real regs land here later).
 pub const MMIO_BASE: u32 = 0x03F0_0000;
 pub const MMIO_SIZE: u32 = 0x0010_0000;
+/// Cart ROM physical base (read-only once loaded).
+pub const CART_BASE: u32 = 0x1000_0000;
+/// KSEG1 uncached mirror of cart ROM.
+pub const CART_KSEG1: u32 = 0xB000_0000;
+/// Largest cart accepted (64 MiB = 512 Mbit, biggest retail carts).
+pub const CART_MAX: usize = 64 * 1024 * 1024;
+/// PIF ROM physical base (read-only once loaded, 2 KiB).
+pub const PIF_ROM_BASE: u32 = 0x1FC0_0000;
+/// KSEG1 mirror of PIF ROM (CPU reset vector `0xBFC00000`).
+pub const PIF_KSEG1: u32 = 0xBFC0_0000;
+pub const PIF_ROM_SIZE: usize = 2048;
+// PIF RAM (JoyChannel scratch, 64 B) is modeled in kernel, not here.
 
 bitflags::bitflags! {
     /// Access permissions per region.
@@ -48,6 +64,10 @@ pub struct Memory {
     imem: Vec<u8>,
     /// Usable RDRAM bytes (4 MiB or 8 MiB). Access above this faults.
     usable: usize,
+    /// Loaded cart ROM (BE bytes). Empty = no cart.
+    cart: Vec<u8>,
+    /// Loaded PIF ROM (exactly 2 KiB). Empty = HLE boot path.
+    pif_rom: Vec<u8>,
 }
 
 impl Memory {
@@ -57,6 +77,8 @@ impl Memory {
             dmem: vec![0; SP_MEM_SIZE],
             imem: vec![0; SP_MEM_SIZE],
             usable: RDRAM_BASE_SIZE,
+            cart: Vec::new(),
+            pif_rom: Vec::new(),
         }
     }
 
@@ -80,6 +102,44 @@ impl Memory {
 
     pub fn usable_size(&self) -> usize {
         self.usable
+    }
+
+    /// Load cart ROM bytes (BE, as produced by the loader). Replaces any
+    /// previous cart. Errors loudly on empty/oversize images.
+    pub fn load_cart(&mut self, data: Vec<u8>) -> Result<()> {
+        if data.is_empty() {
+            return Err(EmuError::Other("cart image is empty".into()));
+        }
+        if data.len() > CART_MAX {
+            return Err(EmuError::Other(format!(
+                "cart image {} bytes exceeds {} MiB max",
+                data.len(),
+                CART_MAX / (1024 * 1024)
+            )));
+        }
+        self.cart = data;
+        Ok(())
+    }
+
+    pub fn cart_len(&self) -> usize {
+        self.cart.len()
+    }
+
+    /// Load the 2 KiB PIF ROM for the LLE boot path. Empty = HLE path.
+    pub fn load_pif_rom(&mut self, data: Vec<u8>) -> Result<()> {
+        if data.len() != PIF_ROM_SIZE {
+            return Err(EmuError::Other(format!(
+                "pif rom must be exactly {} bytes, got {}",
+                PIF_ROM_SIZE,
+                data.len()
+            )));
+        }
+        self.pif_rom = data;
+        Ok(())
+    }
+
+    pub fn has_pif_rom(&self) -> bool {
+        self.pif_rom.len() == PIF_ROM_SIZE
     }
 
     fn translate_rdram(&self, addr: u32, size: usize, need: Perm) -> Result<Option<usize>> {
@@ -129,6 +189,57 @@ impl Memory {
         if (addr as u64) >= i0 && end <= i0 + SP_MEM_SIZE as u64 {
             return Ok(MemRef::Imem((addr - SP_IMEM_BASE) as usize));
         }
+        // Cart ROM (physical + KSEG1 mirror), read-only once loaded.
+        if !self.cart.is_empty() {
+            let len = self.cart.len() as u64;
+            let c0 = CART_BASE as u64;
+            if (addr as u64) >= c0 && end <= c0 + len {
+                if need.contains(Perm::WRITE) {
+                    return Err(EmuError::MemoryFault {
+                        addr,
+                        size,
+                        kind: "write to read-only cart ROM".into(),
+                    });
+                }
+                return Ok(MemRef::Cart((addr - CART_BASE) as usize));
+            }
+            let ck = CART_KSEG1 as u64;
+            if (addr as u64) >= ck && end <= ck + len {
+                if need.contains(Perm::WRITE) {
+                    return Err(EmuError::MemoryFault {
+                        addr,
+                        size,
+                        kind: "write to read-only cart ROM".into(),
+                    });
+                }
+                return Ok(MemRef::Cart((addr - CART_KSEG1) as usize));
+            }
+        }
+        // PIF ROM (physical + KSEG1 reset-vector mirror), read-only.
+        if self.has_pif_rom() {
+            let p0 = PIF_ROM_BASE as u64;
+            if (addr as u64) >= p0 && end <= p0 + PIF_ROM_SIZE as u64 {
+                if need.contains(Perm::WRITE) {
+                    return Err(EmuError::MemoryFault {
+                        addr,
+                        size,
+                        kind: "write to read-only pif ROM".into(),
+                    });
+                }
+                return Ok(MemRef::Pif((addr - PIF_ROM_BASE) as usize));
+            }
+            let pk = PIF_KSEG1 as u64;
+            if (addr as u64) >= pk && end <= pk + PIF_ROM_SIZE as u64 {
+                if need.contains(Perm::WRITE) {
+                    return Err(EmuError::MemoryFault {
+                        addr,
+                        size,
+                        kind: "write to read-only pif ROM".into(),
+                    });
+                }
+                return Ok(MemRef::Pif((addr - PIF_KSEG1) as usize));
+            }
+        }
         if let Some(off) = self.translate_rdram(addr, size, need)? {
             return Ok(MemRef::Rdram(off));
         }
@@ -136,8 +247,10 @@ impl Memory {
             addr,
             size,
             kind: format!(
-                "out-of-range (rdram {}MB + kseg mirrors + sp)",
-                self.usable / (1024 * 1024)
+                "out-of-range (rdram {}MB + kseg mirrors + sp + cart{} + pif{})",
+                self.usable / (1024 * 1024),
+                if self.cart.is_empty() { "" } else { " + cart" },
+                if self.has_pif_rom() { " + pif" } else { "" },
             ),
         })
     }
@@ -154,6 +267,8 @@ impl Memory {
             MemRef::Rdram(off) => out.copy_from_slice(&self.rdram[off..off + out.len()]),
             MemRef::Dmem(off) => out.copy_from_slice(&self.dmem[off..off + out.len()]),
             MemRef::Imem(off) => out.copy_from_slice(&self.imem[off..off + out.len()]),
+            MemRef::Cart(off) => out.copy_from_slice(&self.cart[off..off + out.len()]),
+            MemRef::Pif(off) => out.copy_from_slice(&self.pif_rom[off..off + out.len()]),
         }
     }
 
@@ -162,6 +277,11 @@ impl Memory {
             MemRef::Rdram(off) => self.rdram[off..off + data.len()].copy_from_slice(data),
             MemRef::Dmem(off) => self.dmem[off..off + data.len()].copy_from_slice(data),
             MemRef::Imem(off) => self.imem[off..off + data.len()].copy_from_slice(data),
+            // Translate denies writes to Cart/Pif before we get here; reaching
+            // them is an internal error, never silent.
+            MemRef::Cart(_) | MemRef::Pif(_) => {
+                debug_assert!(false, "store to read-only region");
+            }
         }
     }
 
@@ -257,6 +377,23 @@ impl Memory {
         if addr >= KSEG1_BASE && (addr - KSEG1_BASE) < self.usable as u32 {
             return Some(addr - KSEG1_BASE);
         }
+        if !self.cart.is_empty() {
+            let len = self.cart.len() as u32;
+            if addr >= CART_BASE && addr - CART_BASE < len {
+                return Some(addr);
+            }
+            if addr >= CART_KSEG1 && addr - CART_KSEG1 < len {
+                return Some(addr - CART_KSEG1 + CART_BASE);
+            }
+        }
+        if self.has_pif_rom() {
+            if addr >= PIF_ROM_BASE && addr - PIF_ROM_BASE < PIF_ROM_SIZE as u32 {
+                return Some(addr);
+            }
+            if addr >= PIF_KSEG1 && addr - PIF_KSEG1 < PIF_ROM_SIZE as u32 {
+                return Some(addr - PIF_KSEG1 + PIF_ROM_BASE);
+            }
+        }
         None
     }
 }
@@ -266,6 +403,8 @@ enum MemRef {
     Rdram(usize),
     Dmem(usize),
     Imem(usize),
+    Cart(usize),
+    Pif(usize),
 }
 
 impl Default for Memory {
@@ -330,5 +469,36 @@ mod tests {
         assert!(m.read_u32(MMIO_BASE).is_err());
         let mut m2 = Memory::new();
         assert!(m2.write_u8(MMIO_BASE, 1).is_err());
+    }
+
+    #[test]
+    fn cart_is_readonly_and_mirrored() {
+        let mut m = Memory::new();
+        // No cart yet: reads fault loudly.
+        assert!(m.read_u32(CART_BASE).is_err());
+        let mut cart = vec![0u8; 0x2000];
+        cart[0..4].copy_from_slice(&0x8037_1240u32.to_be_bytes());
+        m.load_cart(cart).unwrap();
+        assert_eq!(m.read_u32(CART_BASE).unwrap(), 0x8037_1240);
+        assert_eq!(m.fetch_u32(CART_KSEG1).unwrap(), 0x8037_1240);
+        // Writes are loud, never silent.
+        assert!(m.write_u32(CART_BASE, 1).is_err());
+        assert!(m.write_u32(CART_KSEG1 + 0x100, 1).is_err());
+        // Past the loaded size faults even inside the window.
+        assert!(m.read_u32(CART_BASE + 0x2000).is_err());
+    }
+
+    #[test]
+    fn pif_rom_reset_vector() {
+        let mut m = Memory::new();
+        assert!(m.fetch_u32(PIF_KSEG1).is_err());
+        let mut pif = vec![0u8; PIF_ROM_SIZE];
+        pif[0..4].copy_from_slice(&0x3C08_BFC0u32.to_be_bytes());
+        m.load_pif_rom(pif).unwrap();
+        assert!(m.has_pif_rom());
+        assert_eq!(m.fetch_u32(PIF_KSEG1).unwrap(), 0x3C08_BFC0);
+        assert_eq!(m.read_u32(PIF_ROM_BASE).unwrap(), 0x3C08_BFC0);
+        assert!(m.write_u32(PIF_KSEG1, 1).is_err());
+        assert!(m.load_pif_rom(vec![0u8; 16]).is_err());
     }
 }
