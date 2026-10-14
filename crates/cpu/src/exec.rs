@@ -318,6 +318,90 @@ pub fn execute(
             mem.write_u16(addr, t.r(rt) as u16)?;
             None
         }
+        Decoded::Lwl { rt, base, off } => {
+            // Big-endian unaligned load, left part: bytes [off..4) of the
+            // aligned word land in the high bytes of rt. Load-delayed.
+            let addr = ea(t.r(base) as u32, off);
+            let aligned = addr & !3;
+            let n = (addr & 3) as usize;
+            let word = mem.read_u32(aligned)?;
+            let mb = word.to_be_bytes();
+            let mut rb = (t.r(rt) as u32).to_be_bytes();
+            rb[..4 - n].copy_from_slice(&mb[n..]);
+            let v = u32::from_be_bytes(rb);
+            t.load_delay = Some((rt, ((v as i32) as i64) as u64));
+            None
+        }
+        Decoded::Lwr { rt, base, off } => {
+            // Big-endian unaligned load, right part: bytes [0..=off] of the
+            // aligned word land in the low bytes of rt. Load-delayed.
+            let addr = ea(t.r(base) as u32, off);
+            let aligned = addr & !3;
+            let n = (addr & 3) as usize + 1;
+            let word = mem.read_u32(aligned)?;
+            let mb = word.to_be_bytes();
+            let mut rb = (t.r(rt) as u32).to_be_bytes();
+            for i in 0..n {
+                rb[4 - n + i] = mb[i];
+            }
+            let v = u32::from_be_bytes(rb);
+            t.load_delay = Some((rt, ((v as i32) as i64) as u64));
+            None
+        }
+        Decoded::Swl { rt, base, off } => {
+            commit_load(t);
+            let addr = ea(t.r(base) as u32, off);
+            let aligned = addr & !3;
+            let n = (addr & 3) as usize;
+            let word = mem.read_u32(aligned)?;
+            let mut mb = word.to_be_bytes();
+            let rb = (t.r(rt) as u32).to_be_bytes();
+            mb[n..].copy_from_slice(&rb[..4 - n]);
+            mem.write_u32(aligned, u32::from_be_bytes(mb))?;
+            None
+        }
+        Decoded::Swr { rt, base, off } => {
+            commit_load(t);
+            let addr = ea(t.r(base) as u32, off);
+            let aligned = addr & !3;
+            let n = (addr & 3) as usize + 1;
+            let word = mem.read_u32(aligned)?;
+            let mut mb = word.to_be_bytes();
+            let rb = (t.r(rt) as u32).to_be_bytes();
+            for i in 0..n {
+                mb[i] = rb[4 - n + i];
+            }
+            mem.write_u32(aligned, u32::from_be_bytes(mb))?;
+            None
+        }
+        Decoded::Ll { rt, base, off } => {
+            let addr = ea(t.r(base) as u32, off);
+            let v = mem.read_u32(addr)?;
+            t.llbit = true;
+            t.lladdr = addr;
+            t.load_delay = Some((rt, ((v as i32) as i64) as u64));
+            None
+        }
+        Decoded::Sc { rt, base, off } => {
+            commit_load(t);
+            // Single-threaded: the reservation always survives unless an
+            // intervening store cleared it (none modeled yet beyond SC).
+            // SMP invalidation is pending work, noted, not faked.
+            let addr = ea(t.r(base) as u32, off);
+            if t.llbit {
+                mem.write_u32(addr, t.r(rt) as u32)?;
+                t.w32(rt, 1);
+            } else {
+                t.w32(rt, 0);
+            }
+            t.llbit = false;
+            None
+        }
+        Decoded::Sync => {
+            // Memory barrier: no-op for the in-order interpreter.
+            commit_load(t);
+            None
+        }
         Decoded::Beq { rs, rt, off } => {
             commit_load(t);
             if t.r(rs) == t.r(rt) {
@@ -503,5 +587,55 @@ mod tests {
         assert_eq!(t.r(1) as u32, 7);
         assert_eq!(t.r(2) as u32, 0);
         assert_eq!(t.pc, 0x8000_0010);
+    }
+
+    #[test]
+    fn unaligned_store_then_load_roundtrip() {
+        // Classic boot-code idiom: swl at addr + swr at addr+3 stores a
+        // whole word unaligned; lwl at addr + lwr at addr+3 reassembles it.
+        // Base $5=0x2000, value $6=0xAABBCCDD, addr=0x2001.
+        let mut mem = Memory::new();
+        let mut t = ThreadState::new(0, 0x8000_0000);
+        step_word(0x2405_2000, &mut t, &mut mem); // addiu $5,$0,0x2000
+        step_word(0x3C06_AABB, &mut t, &mut mem); // lui $6,0xAABB
+        step_word(0x34C6_CCDD, &mut t, &mut mem); // ori $6,$6,0xCCDD
+        step_word(0xA8A6_0001, &mut t, &mut mem); // swl $6,1($5)
+        step_word(0xB8A6_0004, &mut t, &mut mem); // swr $6,4($5)
+                                                  // Bytes at 0x2000..0x2005 read [00 AA BB CC][DD 00 00 00].
+        assert_eq!(mem.read_u32(0x2000).unwrap(), 0x00AA_BBCC);
+        assert_eq!(mem.read_u32(0x2004).unwrap(), 0xDD00_0000);
+        // Reassemble with lwl+lwr.
+        step_word(0x88A8_0001, &mut t, &mut mem); // lwl $8,1($5)
+        step_word(0x98A8_0004, &mut t, &mut mem); // lwr $8,4($5)
+        step_word(0x0000_0000, &mut t, &mut mem); // nop (retire)
+        assert_eq!(t.r(8) as u32, 0xAABB_CCDD);
+    }
+
+    #[test]
+    fn ll_sc_succeeds_single_threaded() {
+        let mut mem = Memory::new();
+        mem.write_u32(0x3000, 5).unwrap();
+        let mut t = ThreadState::new(0, 0x8000_0000);
+        step_word(0x2405_3000, &mut t, &mut mem); // addiu $5,$0,0x3000
+        step_word(0x2406_0009, &mut t, &mut mem); // addiu $6,$0,9
+        step_word(0xC0A7_0000, &mut t, &mut mem); // ll $7,0($5)
+        step_word(0x0000_0000, &mut t, &mut mem); // nop (retire)
+        assert_eq!(t.r(7) as u32, 5);
+        step_word(0xE0A6_0000, &mut t, &mut mem); // sc $6,0($5)
+        assert_eq!(t.r(6) as u32, 1);
+        assert_eq!(mem.read_u32(0x3000).unwrap(), 9);
+        // Reservation consumed: a second SC without LL fails loudly-by-value.
+        step_word(0x2406_0007, &mut t, &mut mem); // addiu $6,$0,7
+        step_word(0xE0A6_0000, &mut t, &mut mem); // sc $6,0($5)
+        assert_eq!(t.r(6) as u32, 0);
+        assert_eq!(mem.read_u32(0x3000).unwrap(), 9);
+    }
+
+    #[test]
+    fn sync_is_nop() {
+        let mut mem = Memory::new();
+        let mut t = ThreadState::new(0, 0x8000_0000);
+        step_word(0x0000_000F, &mut t, &mut mem); // sync
+        assert_eq!(t.pc, 0x8000_0004);
     }
 }

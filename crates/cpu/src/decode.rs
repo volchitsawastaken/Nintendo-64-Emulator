@@ -44,6 +44,13 @@ pub enum Decoded {
     Jalr { rd: u32, rs: u32 },
     Lw { rt: u32, base: u32, off: i16 },
     Sw { rt: u32, base: u32, off: i16 },
+    Lwl { rt: u32, base: u32, off: i16 },
+    Lwr { rt: u32, base: u32, off: i16 },
+    Swl { rt: u32, base: u32, off: i16 },
+    Swr { rt: u32, base: u32, off: i16 },
+    Ll { rt: u32, base: u32, off: i16 },
+    Sc { rt: u32, base: u32, off: i16 },
+    Sync,
     Lb { rt: u32, base: u32, off: i16 },
     Lbu { rt: u32, base: u32, off: i16 },
     Lh { rt: u32, base: u32, off: i16 },
@@ -101,6 +108,7 @@ pub fn decode(word: u32) -> Result<Decoded> {
                 rt: rt(word),
                 sa: sa(word),
             }),
+            0x0F => Ok(Decoded::Sync),
             0x02 => Ok(Decoded::Srl {
                 rd: rd(word),
                 rt: rt(word),
@@ -287,6 +295,11 @@ pub fn decode(word: u32) -> Result<Decoded> {
             base: rs(word),
             off: imm16s(word),
         }),
+        0x22 => Ok(Decoded::Lwl {
+            rt: rt(word),
+            base: rs(word),
+            off: imm16s(word),
+        }),
         0x23 => Ok(Decoded::Lw {
             rt: rt(word),
             base: rs(word),
@@ -302,6 +315,11 @@ pub fn decode(word: u32) -> Result<Decoded> {
             base: rs(word),
             off: imm16s(word),
         }),
+        0x26 => Ok(Decoded::Lwr {
+            rt: rt(word),
+            base: rs(word),
+            off: imm16s(word),
+        }),
         0x28 => Ok(Decoded::Sb {
             rt: rt(word),
             base: rs(word),
@@ -312,13 +330,33 @@ pub fn decode(word: u32) -> Result<Decoded> {
             base: rs(word),
             off: imm16s(word),
         }),
+        0x2A => Ok(Decoded::Swl {
+            rt: rt(word),
+            base: rs(word),
+            off: imm16s(word),
+        }),
         0x2B => Ok(Decoded::Sw {
+            rt: rt(word),
+            base: rs(word),
+            off: imm16s(word),
+        }),
+        0x2E => Ok(Decoded::Swr {
             rt: rt(word),
             base: rs(word),
             off: imm16s(word),
         }),
         0x2F => Ok(Decoded::Cache {
             op: rt(word),
+            base: rs(word),
+            off: imm16s(word),
+        }),
+        0x30 => Ok(Decoded::Ll {
+            rt: rt(word),
+            base: rs(word),
+            off: imm16s(word),
+        }),
+        0x38 => Ok(Decoded::Sc {
+            rt: rt(word),
             base: rs(word),
             off: imm16s(word),
         }),
