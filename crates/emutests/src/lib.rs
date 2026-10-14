@@ -110,19 +110,26 @@ mod integration {
             rom.header.crc2,
             rom.data.len()
         );
+        // Real boot path: cart mapping + PIF HLE/LLE handoff, not a manual
+        // chunk copy. The first fault out of here names the next build item.
         let mut mem = Memory::new();
-        let phys = mem
-            .to_physical(rom.header.entry)
-            .expect("entry must land in RDRAM mirrors");
-        let chunk = rom.data.len().min(1024 * 1024);
-        mem.write_bytes(phys, &rom.data[..chunk]).expect("map rom");
+        let mut cpu = Interpreter::new(0, 0);
+        let boot = n64_kernel::pif::boot(&mut mem, &mut cpu.t, &rom.data, false).expect("pif boot");
+        println!(
+            "boot mode={:?} pc={:08x} cic={:?}",
+            boot.mode, boot.pc, boot.cic
+        );
+        // IPL3 must be executable from the handoff address on HLE.
         for i in 0..8u32 {
-            let w = mem
-                .read_u32(rom.header.entry + i * 4)
-                .unwrap_or(0xFFFF_FFFF);
-            println!("entry+{:02x}: {:08x} {}", i * 4, w, n64_cpu::disasm(w));
+            let w = mem.read_u32(boot.pc + i * 4).unwrap_or(0xFFFF_FFFF);
+            println!("boot+{:02x}: {:08x} {}", i * 4, w, n64_cpu::disasm(w));
         }
-        let mut cpu = Interpreter::new(0, rom.header.entry);
+        // Cart header must read back through both windows.
+        assert_eq!(
+            mem.read_u32(n64_memory::CART_BASE).unwrap(),
+            u32::from_be_bytes([rom.data[0], rom.data[1], rom.data[2], rom.data[3]]),
+            "cart header unreadable via physical window"
+        );
         let mut trace = n64_debugger::TraceBuffer::new(4096);
         let mut fault_free = 0u32;
         for _ in 0..100_000u32 {

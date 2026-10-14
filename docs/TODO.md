@@ -14,13 +14,19 @@ Honest breakdown:
 
 - [x] Workspace (12 crates), VR4300 integer core with delay/load-delay
 - [x] RDRAM + KSEG mirrors, SP DMEM/IMEM, MMIO guard
+- [x] Cart ROM + PIF ROM windows, read-only with KSEG1 mirrors
 - [x] z64/n64/v64 normalize + header parse
+- [x] PIF boot: LLE reset vector when PIF ROM present, HLE IPL3 copy
+      otherwise; CIC checksum detection (unknown CIC is loud)
+- [x] Unaligned LWL/LWR/SWL/SWR, LL/SC, SYNC for IPL3 boot code
+- [x] RSP scalar core (DMEM-relative loads/stores, BREAK halt, vector loud)
 - [x] RDP decode + software fill validation
 - [x] Saves sized by hardware truth, loopback net harness, CLI
 
 ## Active
 
-- [ ] Retail frontier: first `$N64_ROM_FILE` boot fault (run `retail_rom_steps`)
+- [ ] Retail frontier: first SM64 (`$N64_ROM_FILE`) boot fault out of
+      `retail_rom_steps` — IPL3 execution from the HLE handoff
 
 ## Next (retail-driven)
 

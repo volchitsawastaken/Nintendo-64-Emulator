@@ -72,14 +72,12 @@ pub fn cmd_step(rom_path: &str, n: usize) -> Result<()> {
     let raw = std::fs::read(rom_path)?;
     let rom = n64_loader::parse_rom(&raw)?;
     let mut mem = n64_memory::Memory::new();
-    // Map first 1 MiB of ROM at entry's physical window for smoke stepping.
-    let entry = rom.header.entry;
-    let phys = mem
-        .to_physical(entry)
-        .ok_or_else(|| EmuError::Other(format!("entry {:08x} outside RDRAM mirrors", entry)))?;
-    let chunk = rom.data.len().min(1024 * 1024);
-    mem.write_bytes(phys, &rom.data[..chunk])?;
-    let mut cpu = n64_cpu::Interpreter::new(0, entry);
+    let mut cpu = n64_cpu::Interpreter::new(0, 0);
+    let boot = n64_kernel::pif::boot(&mut mem, &mut cpu.t, &rom.data, false)?;
+    println!(
+        "boot mode={:?} pc={:08x} cic={:?}",
+        boot.mode, boot.pc, boot.cic
+    );
     let mut trace = n64_debugger::TraceBuffer::new(256);
     for _ in 0..n {
         let pc = cpu.thread().pc;

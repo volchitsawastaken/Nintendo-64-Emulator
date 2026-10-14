@@ -14,7 +14,8 @@ Statuses: `verified` (tested, evidence), `partial` (some paths work),
 | COP0 (Status/Cause/EPC/Count/Compare) | partial | Others explicit Unsupported |
 | FPU (COP1) | unsupported | Tracked per-word, required for retail |
 | TLB/exceptions | not-started | |
-| RSP vector unit | unsupported | `submit_task` loud with ucode/size |
+| RSP vector unit (COP2) | unsupported | Scalar core partial (DMEM window, BREAK halt); vector ops loud per-word |
+| RSP scalar delay behavior | pending-retail | `RSP_HAS_DELAY_SLOT=false`; first retail ucode arbitrates |
 
 ## RDP/GPU
 
@@ -30,7 +31,8 @@ Statuses: `verified` (tested, evidence), `partial` (some paths work),
 | Area | Status | Notes |
 |---|---|---|
 | z64/n64/v64 normalize + header | partial | Magic + entry + CRC + name; tests |
-| Boot to entry + stepping | partial | CLI `step` with trace; retail gated on `$N64_ROM_FILE` |
+| PIF boot (LLE vector + HLE IPL3) | partial | Reset `0xBFC00000` with PIF ROM; HLE copies 4 KiB to `0xA0000400`; CIC recorded; handoff regs pending retail |
+| Boot to entry + stepping | partial | CLI `step` runs the real boot path with trace; retail gated on `$N64_ROM_FILE` (SM64 first) |
 | Saves (EEPROM/SRAM/FlashRAM/Pak) | partial | Sized by hardware truth, file-backed |
 
 ## Audio/Network/Frontend
