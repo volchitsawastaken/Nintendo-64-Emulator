@@ -10,6 +10,7 @@ use n64_memory::Memory;
 use std::collections::HashMap;
 
 pub mod boot;
+pub mod pif;
 
 /// One HLE service id (libultra-level).
 pub type ServiceId = u32;
@@ -105,7 +106,10 @@ pub fn run_until_exit(
                     });
                 }
                 n64_cpu::TrapKind::Syscall => {
-                    let code = sys.service(t.code, &[]).map_err(|e| {
+                    // Convention: $a0 carries the service argument
+                    // (putc char for service 0, exit code for service 1).
+                    let a0 = cpu.thread().gpr[4] as u32;
+                    let code = sys.service(t.code, &[a0]).map_err(|e| {
                         EmuError::Other(format!("service {} at pc={:08x}: {}", t.code, t.pc, e))
                     })?;
                     if t.code == 1 {
