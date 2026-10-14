@@ -1,0 +1,9 @@
+[package]
+name = "n64-filesystem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+n64-common = { path = "../common" }
+log = "0.4"

@@ -1,0 +1,10 @@
+[package]
+name = "n64-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+n64-common = { path = "../common" }
+n64-memory = { path = "../memory" }
+log = "0.4"

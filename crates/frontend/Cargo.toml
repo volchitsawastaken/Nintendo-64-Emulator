@@ -1,0 +1,23 @@
+[package]
+name = "n64-frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "n64"
+path = "src/main.rs"
+
+[dependencies]
+n64-common = { path = "../common" }
+n64-memory = { path = "../memory" }
+n64-cpu = { path = "../cpu" }
+n64-loader = { path = "../loader" }
+n64-gpu = { path = "../gpu" }
+n64-audio = { path = "../audio" }
+n64-filesystem = { path = "../filesystem" }
+n64-kernel = { path = "../kernel" }
+n64-network = { path = "../network" }
+n64-debugger = { path = "../debugger" }
+log = "0.4"
+env_logger = "0.11"
